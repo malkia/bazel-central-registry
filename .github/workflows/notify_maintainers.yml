@@ -11,12 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@eb238b55efaa70779f274895e782ed17c84f2895 # v2.6.1
+        uses: step-security/harden-runner@5c7944e73c4c2a096b17a9cb74d65b6c2bbafbde # v2.9.1
         with:
           egress-policy: audit
 
       - name: Run BCR PR Reviewer
-        uses: bazelbuild/continuous-integration/actions/bcr-pr-reviewer@9fddc08b79867b8eea406c2d75898d4e98b20388 # master
+        uses: bazelbuild/continuous-integration/actions/bcr-pr-reviewer@ecb81a9f161e6a560633222436406e41b93f6991 # master
         with:
           # This token needs to be updated annually on Feb 05.
           token: ${{ secrets.BCR_PR_REVIEW_HELPER_TOKEN }}
