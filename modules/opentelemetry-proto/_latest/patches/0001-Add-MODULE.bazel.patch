@@ -6,7 +6,7 @@ index 0000000..07d6a90
 @@ -0,0 +1,151 @@
 +# Copyright The OpenTelemetry Authors
 +# SPDX-License-Identifier: Apache-2.0
-+# Just a test to see if using latest symlink would work
++
 +load("@com_github_grpc_grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
 +load("@rules_proto//proto:defs.bzl", "proto_library")
 +
