@@ -3,17 +3,17 @@
     "maintainers": [
         {
             "name": "Alex Eagle",
-            "email": "alex@aspect.dev",
+            "email": "alex@aspect.build",
             "github": "alexeagle"
         },
         {
             "name": "Greg Magolan",
-            "email": "greg@aspect.dev",
+            "email": "greg@aspect.build",
             "github": "gregmagolan"
         },
         {
             "name": "Jason Bedard",
-            "email": "jason@aspect.dev",
+            "email": "jason@aspect.build",
             "github": "jbedard"
         }
     ],
@@ -124,7 +124,10 @@
         "2.0.1",
         "2.0.2",
         "2.1.0",
-        "2.1.1"
+        "2.1.1",
+        "2.1.2",
+        "2.1.3",
+        "2.2.0"
     ],
     "yanked_versions": {}
 }
