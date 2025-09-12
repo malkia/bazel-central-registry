@@ -77,8 +77,9 @@ COLOR = {
     BcrValidationResult.FAILED: RED,
 }
 
-# TODO(fweikert): switch to a stable release that contains https://github.com/slsa-framework/slsa-verifier/pull/840
-DEFAULT_SLSA_VERIFIER_VERSION = "v2.7.1-rc.1"
+UPSTREAM_MODULES_DIR_URL = "https://bcr.bazel.build/modules"
+
+DEFAULT_SLSA_VERIFIER_VERSION = "v2.7.1"
 
 ATTESTATIONS_DOCS_URL = "https://github.com/bazelbuild/bazel-central-registry/blob/main/docs/attestations.md"
 
@@ -115,7 +116,7 @@ def parse_module_versions(registry, check_all, inputs):
 def apply_patch(work_dir, patch_strip, patch_file):
     # Requires patch to be installed
     subprocess.run(
-        ["patch", "-p%d" % patch_strip, "-f", "-l", "-i", patch_file],
+        ["patch", "--strip", str(patch_strip), "--force", "--fuzz", "0", "--ignore-whitespace", "--input", patch_file],
         shell=False,
         check=True,
         env=os.environ,
@@ -198,7 +199,7 @@ def check_github_url(repo_path, source_url):
     # Avoid potential path manipulations with "../"
     normalized_path = os.path.abspath(parts.path)
 
-    # If the URL doesn't starts with https://github.com/<repo_path>, return False
+    # If the URL doesn't start with https://github.com/<repo_path>, return False
     if parts.scheme != "https" or parts.netloc != "github.com" or not normalized_path.startswith(f"/{repo_path}/"):
         return False
 
@@ -236,6 +237,33 @@ def get_github_user_id(github_username):
         GITHUB_USER_ID_CACHE[github_username] = user_id
         return user_id
     return None
+
+
+def is_valid_bazel_compatibility_for_overlay(bazel_compatibility):
+    """
+    Returns whether the bazel_compatibility is valid for an overlay.
+    See: https://bazel.build/rules/lib/globals/module#module
+
+    Args:
+        bazel_compatibility: List of bazel compatibility strings.
+
+    Returns:
+        Boolean indicating compatibility with source overlays.
+    """
+    if not bazel_compatibility:
+        return False
+    for v in bazel_compatibility:
+        m = re.fullmatch(r"^([><-]=?)(\d+\.\d+\.\d+)$", v)
+        if not m or m.group(1) == "-":
+            continue  # Skip - versions
+        version = tuple(int(i) for i in m.group(2).split("."))
+        if m.group(1) == ">":
+            if version > (7, 2, 0):
+                return True
+        elif m.group(1) == ">=":
+            if version >= (7, 2, 1):
+                return True
+    return False
 
 
 class BcrValidationException(Exception):
@@ -286,7 +314,7 @@ class BcrValidator:
                 source_url = "https://" + source_netloc + "/" + source_parts
             if source_url.endswith(".git"):
                 source_url = source_url.removesuffix(".git")
-                # The asterisk here is to prevent the final slash from getting
+                # The asterisk here is to prevent the final slash from being
                 # dropped by os.path.abspath().
                 source_url = source_url + "/*"
         else:
@@ -491,8 +519,13 @@ class BcrValidator:
                     and isinstance(node.value.func, ast.Name)
                     and node.value.func.id == "module"
                 ):
-                    keywords = {k.arg: k.value.value for k in node.value.keywords if isinstance(k.value, ast.Constant)}
-                    return keywords.get(attribute, default)
+                    for k in node.value.keywords:
+                        if k.arg == attribute:
+                            if isinstance(k.value, ast.Constant):
+                                return k.value.value
+                            if isinstance(k.value, ast.List):
+                                return [v.value for v in k.value.elts if isinstance(v, ast.Constant)]
+                    return default
 
     def verify_module_dot_bazel(self, module_name, version, check_compatibility_level=True):
         source = self.registry.get_source(module_name, version)
@@ -613,23 +646,56 @@ class BcrValidator:
                 "Checked in MODULE.bazel version does not match the version of the module directory added.",
             )
 
-        # Check the compatibility_level in MODULE.bazel matches the previous version
+        # Check the compatibility_level in MODULE.bazel is monotonically increasing. Also cautiously fail if
+        # it doesn't match the previous version's compatibility_level, but allow the user to skip this check.
         versions = self.registry.get_metadata(module_name)["versions"]
         versions.sort(key=Version)
         index = versions.index(version)
-        if check_compatibility_level and index > 0:
-            pre_version = versions[index - 1]
-            previous_module_dot_bazel = self.registry.get_module_dot_bazel_path(module_name, pre_version)
-            current_compatibility_level = BcrValidator.extract_attribute_from_module(
-                bcr_module_dot_bazel, "compatibility_level", 0
+        current_compatibility_level = BcrValidator.extract_attribute_from_module(
+            bcr_module_dot_bazel, "compatibility_level", 0
+        )
+        if index < len(versions) - 1:
+            next_version = versions[index + 1]
+            next_module_dot_bazel = self.registry.get_module_dot_bazel_path(module_name, next_version)
+            next_compatibility_level = BcrValidator.extract_attribute_from_module(
+                next_module_dot_bazel, "compatibility_level", 0
             )
+            if current_compatibility_level > next_compatibility_level:
+                self.report(
+                    BcrValidationResult.FAILED,
+                    f"The new module version {version} has a higher compatibility level than the next version {next_version} ({current_compatibility_level} > {next_compatibility_level}).\n"
+                    + "This is not allowed, the compatibility level must be monotonically increasing.\n",
+                )
+        if index > 0:
+            previous_version = versions[index - 1]
+            previous_module_dot_bazel = self.registry.get_module_dot_bazel_path(module_name, previous_version)
             previous_compatibility_level = BcrValidator.extract_attribute_from_module(
                 previous_module_dot_bazel, "compatibility_level", 0
             )
-            if current_compatibility_level != previous_compatibility_level:
+            if current_compatibility_level < previous_compatibility_level:
                 self.report(
                     BcrValidationResult.FAILED,
-                    f"The compatibility_level in the new module version ({current_compatibility_level}) doesn't match the previous version ({previous_compatibility_level}). ",
+                    f"The new module version {version} has a lower compatibility level than the previous version {previous_version} ({current_compatibility_level} < {previous_compatibility_level}).\n"
+                    + "This is not allowed, the compatibility level must be monotonically increasing.\n",
+                )
+            if check_compatibility_level and current_compatibility_level != previous_compatibility_level:
+                self.report(
+                    BcrValidationResult.FAILED,
+                    f"The compatibility_level in the new module version ({current_compatibility_level}) doesn't match the previous version ({previous_compatibility_level}).\n"
+                    + "If this is intentional, please comment on your PR `@bazel-io skip_check compatibility_level`\n"
+                    + "Learn more about when to increase the compatibility level at https://bazel.build/external/faq#incrementing-compatibility-level",
+                )
+
+        # Check that bazel_compatability is sufficient when using "overlay"
+        if "overlay" in source:
+            current_bazel_compatibility = BcrValidator.extract_attribute_from_module(
+                bcr_module_dot_bazel, "bazel_compatibility", []
+            )
+            if not is_valid_bazel_compatibility_for_overlay(current_bazel_compatibility):
+                self.report(
+                    BcrValidationResult.FAILED,
+                    "When using overlay files the module must set `bazel_compatibility` constraints to "
+                    f"at least `['>=7.2.1']`, got {current_bazel_compatibility}. ",
                 )
 
         shutil.rmtree(tmp_dir)
@@ -642,7 +708,7 @@ class BcrValidator:
                     "Missing bazel version for task '%s' in the presubmit.yml file." % task_name,
                 )
 
-    def validate_presubmit_yml(self, module_name, version):
+    def validate_presubmit_tasks(self, module_name, version):
         presubmit_yml = self.registry.get_presubmit_yml_path(module_name, version)
         presubmit = yaml.safe_load(open(presubmit_yml, "r"))
         report_num_old = len(self.validation_results)
@@ -702,9 +768,11 @@ class BcrValidator:
         self.verify_source_archive_url_integrity(module_name, version)
         if "presubmit_yml" not in skipped_validations:
             self.verify_presubmit_yml_change(module_name, version)
-        self.validate_presubmit_yml(module_name, version)
+        if "presubmit_task" not in skipped_validations:
+            self.validate_presubmit_tasks(module_name, version)
         self.verify_module_dot_bazel(module_name, version, "compatibility_level" not in skipped_validations)
-        self.verify_attestations(module_name, version)
+        if "attestations" not in skipped_validations:
+            self.verify_attestations(module_name, version)
 
     def validate_metadata(self, modules):
         print_expanded_group(f"Validating metadata.json files for {modules}")
@@ -846,7 +914,7 @@ class BcrValidator:
         # Calculate the overall return code
         # 0: All good
         # 1: BCR validation failed
-        # 42: BCR validation passes, but some changes need BCR maintainer review before trigging follow up BCR presubmit jobs.
+        # 42: BCR validation passes, but some changes need BCR maintainer review before triggering follow up BCR presubmit jobs.
         result_codes = [code for code, _ in self.validation_results]
         if BcrValidationResult.FAILED in result_codes:
             return 1
@@ -900,9 +968,12 @@ def main(argv=None):
         type=str,
         default=[],
         action="append",
-        help='Bypass the given step for validating modules. Supported values are: "url_stability", '
-        + 'to bypass the URL stability check; "presubmit_yml", to bypass the presubmit.yml check; '
+        help="Bypass the given step for validating modules. Supported values are: "
+        + '"url_stability", to bypass the URL stability check; '
+        + '"presubmit_yml", to bypass the presubmit.yml check; '
+        + '"presubmit_task", to bypass the presubmit.yml tasks check; '
         + '"source_repo", to bypass the source repo verification; '
+        + '"attestations", to skip the attestations check. '
         + "This flag can be repeated to skip multiple validations.",
     )
 
@@ -921,8 +992,8 @@ def main(argv=None):
         for name, version in module_versions:
             print(f"{name}@{version}")
 
-    # TODO: Read org etc from flags to support forks.
-    upstream = UpstreamRegistry()
+    # TODO: Read url from flags to support forks.
+    upstream = UpstreamRegistry(modules_dir_url=UPSTREAM_MODULES_DIR_URL)
 
     # Validate given module version.
     validator = BcrValidator(registry, upstream, args.fix)
